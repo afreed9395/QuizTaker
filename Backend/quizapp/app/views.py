@@ -1,5 +1,5 @@
 from django.shortcuts import render
-
+import time
 from rest_framework.decorators import api_view,permission_classes
 from rest_framework.permissions import AllowAny
 from django.contrib.auth import  authenticate
@@ -11,6 +11,10 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth.models import User
 from django.core.mail import send_mail
 from rest_framework.permissions import IsAuthenticated
+from  django.core.cache import cache
+
+from .ai_service import generate_feedback
+
 
 # Create your views here.
 
@@ -250,19 +254,7 @@ def attemptsbyId(request,pk):
         attempt.delete()
         return Response(status=status.HTTP_200_OK)
     
-# @api_view(['PUT'])
-# def finalize_score(request,pk):
-#     try:
-#         attempt= Quizattempts.objects.get(id=pk)
-#     except Quizattempts.DoesNotExist:
-#         return  Response(status=status.HTTP_400_BAD_REQUEST)
 
-#     #calculate the score using the model method
-
-#     attempt.score= attempt.calculate_score()
-#     attempt.save()
-#     serializer= QuizattemptsSerializer(attempt)
-#     return Response(serializer.data,status=status.HTTP_201_CREATED)
 
 from rest_framework.permissions import IsAuthenticated
 
@@ -285,6 +277,11 @@ def quiz_submit_view(request):
         student=request.user,
         topic=topic
     )
+    cache.set('attempt_id',quiz_attempt.id,10)
+    print(quiz_attempt.id)
+    print(quiz_attempt.student)
+
+
 
     for answer_item in answers:
         question_id = answer_item.get("question_id")
@@ -355,9 +352,55 @@ def getUserProfile(request, pk):
     serializer = UserSerializer(user)
     return Response(serializer.data, status=status.HTTP_200_OK)
 
-                
+from .ai_service import generate_feedback
 
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_attempt_feedback(request):
+    attemptid = cache.get('attempt_id')
+    if not attemptid:
+        return Response({"error": "Quiz attempt not found"}, status=status.HTTP_404_NOT_FOUND)
+    
+    try:
+        quiz_attempt = Quizattempts.objects.get(id=attemptid, student=request.user)
+    except Quizattempts.DoesNotExist:
+        return Response({"error": "Quiz attempt not found"}, status=status.HTTP_404_NOT_FOUND)
 
+    result_data = []
+    for answer in quiz_attempt.answers.all():
+        # time.sleep(10)
+        question = answer.question
+        options_qs = question.options.all()
+        options = [
+            {
+                "id": opt.id,
+                "option": opt.option,
+                "is_correct": opt.is_correct,
+            } for opt in options_qs
+        ]
+        correct_option = next((opt for opt in options_qs if opt.is_correct), None)
+        
+        # Generate AI-driven feedback
+        feedback = generate_feedback(
+            question_text=question.question,
+            selected_answer=answer.selected_option.option,
+            correct_answer=correct_option.option if correct_option else "N/A"
+        )
+        
+        result_data.append({
+            "question": question.question,
+            "options": options,
+            "selected_option": answer.selected_option.id,
+            "correct_option": correct_option.id if correct_option else None,
+            "feedback": feedback  # Include the AI explanation here
+        })
 
+    data = {
+        "attempt_id": quiz_attempt.id,
+        "score": quiz_attempt.score,
+        "details": result_data,
+    }    
+
+    return Response(data, status=status.HTTP_200_OK)
